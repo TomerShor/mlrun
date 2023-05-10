@@ -20,6 +20,7 @@ import mlrun
 import mlrun.api.utils.singletons.k8s
 import mlrun.runtimes
 from mlrun.utils import logger
+from mlrun.utils.clones import is_azure_devops_repository_url
 
 
 def resolve_function_http_trigger(function_spec):
@@ -297,7 +298,7 @@ def compile_nuclio_archive_config(
         username = get_secret("GIT_USERNAME")
 
         token = get_secret("GIT_TOKEN")
-        if token:
+        if token and not is_azure_devops_repository_url(source):
             username, password = mlrun.utils.get_git_username_password_from_token(token)
 
         code_entry_attributes["username"] = username

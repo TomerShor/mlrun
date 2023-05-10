@@ -128,7 +128,7 @@ def clone_git(url, context, secrets=None, clone=True):
         or ""
     )
     token = get_secret("GITHUB_TOKEN") or get_secret("GIT_TOKEN")
-    if token:
+    if token and not is_azure_devops_repository_url(url_obj.hostname):
         username, password = get_git_username_password_from_token(token)
 
     clone_path = f"https://{host}{url_obj.path}"
@@ -184,3 +184,7 @@ def extract_source(source: str, workdir=None, secrets=None, clone=True):
 
     logger.info(f"extracting source from {source} to {target_dir}")
     return target_dir
+
+
+def is_azure_devops_repository_url(url):
+    return "dev.azure.com" in url
