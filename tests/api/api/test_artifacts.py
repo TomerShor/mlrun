@@ -577,6 +577,24 @@ def test_get_artifact_with_format_query(db: Session, client: TestClient) -> None
     assert resp.status_code == HTTPStatus.OK.value
 
 
+def test_get_artifact_with_tag(db: Session, client: TestClient) -> None:
+    _create_project(client)
+    artifact = mlrun.artifacts.Artifact(key=KEY, body="123")
+
+    resp = client.post(
+        STORE_API_ARTIFACTS_PATH.format(project=PROJECT, uid=UID, key=KEY, tag=TAG),
+        data=artifact.to_json(),
+    )
+    assert resp.status_code == HTTPStatus.OK.value
+
+    artifact_path = GET_API_ARTIFACT_PATH.format(project=PROJECT, key=KEY, tag=TAG)
+    resp = client.get(artifact_path)
+
+    metadata = resp.json()["data"]["metadata"]
+    assert "tag" in metadata
+    assert metadata["tag"] == TAG
+
+
 def test_list_artifact_with_multiple_tags(db: Session, client: TestClient):
     _create_project(client)
 
