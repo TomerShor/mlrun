@@ -775,10 +775,8 @@ class SQLDB(DBInterface):
         query = self._query(session, ArtifactV2, key=key, project=project)
 
         computed_tag = tag or "latest"
-        enrich_tag = False
 
         if tag and not uid:
-            enrich_tag = True
             # If a tag is given, we can join and filter on the tag
             query = query.join(ArtifactV2.Tag, ArtifactV2.Tag.obj_id == ArtifactV2.id)
             query = query.filter(ArtifactV2.Tag.name == computed_tag)
@@ -818,7 +816,7 @@ class SQLDB(DBInterface):
         artifact = db_artifact.full_object
 
         # If connected to a tag add it to metadata
-        if enrich_tag:
+        if tag:
             self._set_tag_in_artifact_struct(artifact, computed_tag)
 
         return mlrun.common.formatters.ArtifactFormat.format_obj(artifact, format_)
