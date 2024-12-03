@@ -46,9 +46,9 @@ class TestAlerts(TestAlertsBase):
         assert alerts[0]["name"] == alert_name
 
     def test_list_alerts_for_all_projects(self, db: Session, client: TestClient):
+        alert_name = "alert-name"
         for i in range(2):
             project = f"test-alerts-{i}"
-            alert_name = f"alert-name-{i}"
             self._create_project(db, project)
             alert_config = self._create_alert_config(alert_name, project)
             resp = client.put(
