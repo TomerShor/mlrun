@@ -30,6 +30,69 @@ class TestAlerts(TestAlertsBase):
         project = "test-alerts"
         alert_name = "alert-name"
         self._create_project(db, project)
+        alert_config = self._create_alert_config(alert_name, project)
+        resp = client.put(
+            STORE_ALERTS_PATH.format(project=project, name=alert_name),
+            json=alert_config.dict(),
+        )
+        assert resp.status_code == HTTPStatus.OK.value
+
+        resp = client.get(
+            ALERTS_PATH.format(project=project),
+        )
+        assert resp.status_code == HTTPStatus.OK.value
+        alerts = resp.json()
+        assert len(alerts) == 1
+        assert alerts[0]["name"] == alert_name
+
+    def test_list_alerts_for_all_projects(self, db: Session, client: TestClient):
+        for i in range(2):
+            project = f"test-alerts-{i}"
+            alert_name = f"alert-name-{i}"
+            self._create_project(db, project)
+            alert_config = self._create_alert_config(alert_name, project)
+            resp = client.put(
+                STORE_ALERTS_PATH.format(project=project, name=alert_name),
+                json=alert_config.dict(),
+            )
+            assert resp.status_code == HTTPStatus.OK.value
+
+        # list alerts for all projects
+        resp = client.get(
+            ALERTS_PATH.format(project="*"),
+        )
+        assert resp.status_code == HTTPStatus.OK.value
+        alerts = resp.json()
+        assert len(alerts) == 2
+
+        # list alerts for a specific project
+        resp = client.get(
+            ALERTS_PATH.format(project="test-alerts-0"),
+        )
+        assert resp.status_code == HTTPStatus.OK.value
+        alerts = resp.json()
+        assert len(alerts) == 1
+
+        # list alerts for a non-existing project
+        resp = client.get(
+            ALERTS_PATH.format(project="non-existing-project"),
+        )
+        assert resp.status_code == HTTPStatus.NOT_FOUND.value
+        assert "does not exist" in resp.text
+
+    # TODO: Move to test utils framework
+    @staticmethod
+    def _create_project(session: Session, project_name: str):
+        db = framework.utils.singletons.db.get_db()
+        db.create_project(
+            session,
+            mlrun.common.schemas.Project(
+                metadata=mlrun.common.schemas.ProjectMetadata(name=project_name),
+            ),
+        )
+
+    @staticmethod
+    def _create_alert_config(alert_name, project):
         notification = mlrun.model.Notification(
             kind="slack",
             when=["completed", "error"],
@@ -55,26 +118,4 @@ class TestAlerts(TestAlertsBase):
             notifications=[{"notification": notification.to_dict()}],
             reset_policy=mlrun.common.schemas.alert.ResetPolicy.MANUAL,
         )
-        resp = client.put(
-            STORE_ALERTS_PATH.format(project=project, name=alert_name),
-            json=alert_config.dict(),
-        )
-        assert resp.status_code == HTTPStatus.OK.value
-
-        resp = client.get(
-            ALERTS_PATH.format(project=project),
-        )
-        assert resp.status_code == HTTPStatus.OK.value
-        alerts = resp.json()
-        assert len(alerts) == 1
-        assert alerts[0]["name"] == alert_name
-
-    # TODO: Move to test utils framework
-    def _create_project(self, session: Session, project_name: str):
-        db = framework.utils.singletons.db.get_db()
-        db.create_project(
-            session,
-            mlrun.common.schemas.Project(
-                metadata=mlrun.common.schemas.ProjectMetadata(name=project_name),
-            ),
-        )
+        return alert_config
