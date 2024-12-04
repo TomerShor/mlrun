@@ -19,18 +19,25 @@ from sqlalchemy.orm import Session
 import mlrun.common.schemas
 
 import framework.utils.singletons.db
-from services.alerts.tests.unit.conftest import TestAlertsBase
+import services.alerts.tests.unit.conftest
+import services.alerts.tests.unit.crud.utils
 
 ALERTS_PATH = "projects/{project}/alerts"
 STORE_ALERTS_PATH = "projects/{project}/alerts/{name}"
 
 
-class TestAlerts(TestAlertsBase):
+class TestAlerts(services.alerts.tests.unit.conftest.TestAlertsBase):
     def test_store_alerts(self, db: Session, client: TestClient):
         project = "test-alerts"
         alert_name = "alert-name"
         self._create_project(db, project)
-        alert_config = self._create_alert_config(alert_name, project)
+        alert_config = services.alerts.tests.unit.crud.utils.generate_alert_data(
+            project=project,
+            name=alert_name,
+            entity=services.alerts.tests.unit.crud.utils.generate_alert_entity(
+                project=project
+            ),
+        )
         resp = client.put(
             STORE_ALERTS_PATH.format(project=project, name=alert_name),
             json=alert_config.dict(),
@@ -50,7 +57,13 @@ class TestAlerts(TestAlertsBase):
         for i in range(2):
             project = f"test-alerts-{i}"
             self._create_project(db, project)
-            alert_config = self._create_alert_config(alert_name, project)
+            alert_config = services.alerts.tests.unit.crud.utils.generate_alert_data(
+                project=project,
+                name=alert_name,
+                entity=services.alerts.tests.unit.crud.utils.generate_alert_entity(
+                    project=project
+                ),
+            )
             resp = client.put(
                 STORE_ALERTS_PATH.format(project=project, name=alert_name),
                 json=alert_config.dict(),
@@ -90,32 +103,3 @@ class TestAlerts(TestAlertsBase):
                 metadata=mlrun.common.schemas.ProjectMetadata(name=project_name),
             ),
         )
-
-    @staticmethod
-    def _create_alert_config(alert_name, project):
-        notification = mlrun.model.Notification(
-            kind="slack",
-            when=["completed", "error"],
-            name="test-alert-notification",
-            message="test-message",
-            condition="",
-            severity="info",
-            params={"webhook": "some-value"},
-        )
-        alert_config = mlrun.common.schemas.AlertConfig(
-            project=project,
-            name=alert_name,
-            summary="oops",
-            severity=mlrun.common.schemas.alert.AlertSeverity.HIGH,
-            entities={
-                "kind": mlrun.common.schemas.alert.EventEntityKind.MODEL_ENDPOINT_RESULT,
-                "project": project,
-                "ids": [1234],
-            },
-            trigger={
-                "events": [mlrun.common.schemas.alert.EventKind.DATA_DRIFT_DETECTED]
-            },
-            notifications=[{"notification": notification.to_dict()}],
-            reset_policy=mlrun.common.schemas.alert.ResetPolicy.MANUAL,
-        )
-        return alert_config
