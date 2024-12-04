@@ -27,7 +27,7 @@ STORE_ALERTS_PATH = "projects/{project}/alerts/{name}"
 
 
 class TestAlerts(services.alerts.tests.unit.conftest.TestAlertsBase):
-    def test_store_alerts(self, db: Session, client: TestClient):
+    def test_store_alerts(self, db: Session, client: TestClient, k8s_secrets_mock):
         project = "test-alerts"
         alert_name = "alert-name"
         self._create_project(db, project)
@@ -52,7 +52,7 @@ class TestAlerts(services.alerts.tests.unit.conftest.TestAlertsBase):
         assert len(alerts) == 1
         assert alerts[0]["name"] == alert_name
 
-    def test_list_alerts_for_all_projects(self, db: Session, client: TestClient):
+    def test_list_alerts_for_all_projects(self, db: Session, client: TestClient, k8s_secrets_mock):
         alert_name = "alert-name"
         for i in range(2):
             project = f"test-alerts-{i}"
