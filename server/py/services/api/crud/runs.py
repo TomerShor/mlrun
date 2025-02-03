@@ -269,33 +269,14 @@ class Runs(
             )
             return
 
-        run_state = run.get("status", {}).get("state")
-        if (
-            run_state
-            in mlrun.common.runtimes.constants.RunStates.not_allowed_for_deletion_states()
-        ):
-            raise mlrun.errors.MLRunInvalidArgumentError(
-                f"Can not delete run in {run_state} state, consider aborting the run first"
-            )
+        self._delete_run_resources(db_session, project, run)
 
+        # get runtime kind for logging
         runtime_kind = (
             run.get("metadata", {})
             .get("labels", {})
             .get(mlrun_constants.MLRunInternalLabels.kind)
         )
-        if runtime_kind in mlrun.runtimes.RuntimeKinds.runtime_with_handlers():
-            runtime_handler = services.api.runtime_handlers.get_runtime_handler(
-                runtime_kind
-            )
-            if runtime_handler.are_resources_coupled_to_run_object():
-                runtime_handler.delete_runtime_object_resources(
-                    framework.utils.singletons.db.get_db(),
-                    db_session,
-                    object_id=uid,
-                    label_selector=f"{mlrun_constants.MLRunInternalLabels.project}={project}",
-                    force=True,
-                )
-
         logger.debug(
             "Deleting run",
             project=project,
@@ -341,20 +322,30 @@ class Runs(
                 labels=labels,
                 states=[state] if state else None,
                 start_time_from=start_time_from,
-                return_as_run_structs=False,
             )
 
         failed_deletions = 0
         last_exception = None
+        run_uids_to_delete = []
+
+        # Delete each run's resources asynchronously in batches
         while runs_list:
             tasks = []
-            for run in runs_list[: mlrun.mlconf.crud.runs.batch_delete_runs_chunk_size]:
+            runs_batch = runs_list[
+                : mlrun.mlconf.crud.runs.batch_delete_runs_chunk_size
+            ]
+            run_uids_to_delete.extend(
+                [run.get("metadata", {}).get("uid") for run in runs_batch]
+            )
+            for run in runs_batch:
                 tasks.append(
-                    framework.db.session.run_function_with_new_db_session(
-                        self.delete_run,
-                        run.uid,
-                        run.iteration,
-                        run.project,
+                    asyncio.create_task(
+                        run_in_threadpool(
+                            framework.db.session.run_function_with_new_db_session,
+                            self._delete_run_resources,
+                            project,
+                            run,
+                        )
                     )
                 )
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -363,15 +354,28 @@ class Runs(
                     failed_deletions += 1
                     last_exception = result
                     run = runs_list[i]
+                    uid = run.get("metadata", {}).get("uid")
+                    run_uids_to_delete.remove(uid)
                     logger.warning(
                         "Failed to delete run",
-                        run_uid=run.uid,
-                        run_name=run.name,
-                        project=run.project,
+                        run_uid=uid,
+                        run_name=run.get("metadata", {}).get("name"),
+                        project=project,
                         error=mlrun.errors.err_to_str(result),
                     )
 
             runs_list = runs_list[mlrun.mlconf.crud.runs.batch_delete_runs_chunk_size :]
+
+        # Delete runs from DB
+        if run_uids_to_delete:
+            framework.utils.singletons.db.get_db().del_runs(
+                session=db_session,
+                project=project,
+                uids=run_uids_to_delete,
+            )
+
+        # Delete logs
+        await self._post_delete_runs(project=project, uids=run_uids_to_delete)
 
         if failed_deletions:
             raise mlrun.errors.MLRunBadRequestError(
@@ -513,6 +517,64 @@ class Runs(
             run["status"]["artifacts"] = artifacts
 
     @staticmethod
+    def _delete_run_resources(
+        db_session, project, run: typing.Union[dict, mlrun.RunObject]
+    ):
+        if isinstance(run, mlrun.RunObject):
+            run = run.to_dict()
+
+        # validate run state allowed for deletion
+        run_state = run.get("status", {}).get("state")
+        if (
+            run_state
+            in mlrun.common.runtimes.constants.RunStates.not_allowed_for_deletion_states()
+        ):
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                f"Can not delete run in {run_state} state, consider aborting the run first"
+            )
+
+        runtime_kind = (
+            run.get("metadata", {})
+            .get("labels", {})
+            .get(mlrun_constants.MLRunInternalLabels.kind)
+        )
+        uid = run.get("metadata", {}).get("uid")
+
+        # If time passed is start_time + deletion_grace_period + 1 day, assume the resources are already gone
+        # and skip deleting runtime resources
+        start_time = run.get("status", {}).get("start_time")
+        if start_time:
+            start_time = mlrun.utils.helpers.datetime_from_iso(start_time)
+            deletion_grace_period = int(
+                mlrun.mlconf.runtime_resources_deletion_grace_period
+            )
+            if datetime.datetime.now(
+                datetime.timezone.utc
+            ) > start_time + datetime.timedelta(
+                seconds=deletion_grace_period
+            ) + datetime.timedelta(days=1):
+                logger.debug(
+                    "Skipping deleting runtime resources",
+                    project=project,
+                    uid=uid,
+                    iter=iter,
+                    runtime_kind=runtime_kind,
+                )
+
+        if runtime_kind in mlrun.runtimes.RuntimeKinds.runtime_with_handlers():
+            runtime_handler = services.api.runtime_handlers.get_runtime_handler(
+                runtime_kind
+            )
+            if runtime_handler.are_resources_coupled_to_run_object():
+                runtime_handler.delete_runtime_object_resources(
+                    framework.utils.singletons.db.get_db(),
+                    db_session,
+                    object_id=uid,
+                    label_selector=f"{mlrun_constants.MLRunInternalLabels.project}={project}",
+                    force=True,
+                )
+
+    @staticmethod
     async def _post_delete_run(project, uid):
         if (
             mlrun.mlconf.log_collector.mode
@@ -525,6 +587,21 @@ class Runs(
                 project,
                 uid,
             )
+
+    @staticmethod
+    async def _post_delete_runs(project: str, uids: list[str]):
+        if (
+            mlrun.mlconf.log_collector.mode
+            != mlrun.common.schemas.LogsCollectorMode.legacy
+        ):
+            await services.api.crud.Logs().delete_runs_logs(project, uids)
+        else:
+            for uid in uids:
+                await run_in_threadpool(
+                    services.api.crud.Logs().delete_run_logs_legacy,
+                    project,
+                    uid,
+                )
 
     def _update_aborted_run(self, db_session, project, uid, iter, data):
         if (
