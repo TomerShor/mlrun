@@ -33,6 +33,7 @@ from mlrun.utils import logger
 
 import framework.constants
 import framework.db.session
+import framework.db.sqldb.models
 import framework.utils.background_tasks
 import framework.utils.clients.log_collector
 import framework.utils.notifications
@@ -269,7 +270,7 @@ class Runs(
             )
             return
 
-        self._delete_run_resources(db_session, project, run)
+        self._delete_run_resources(db_session, project, uid, run)
 
         # get runtime kind for logging
         runtime_kind = (
@@ -322,11 +323,12 @@ class Runs(
                 labels=labels,
                 states=[state] if state else None,
                 start_time_from=start_time_from,
+                return_as_run_structs=False,
             )
 
         failed_deletions = 0
         last_exception = None
-        run_uids_to_delete = []
+        project_to_run_uids_to_delete = {}
 
         # Delete each run's resources asynchronously in batches
         while runs_list:
@@ -334,16 +336,17 @@ class Runs(
             runs_batch = runs_list[
                 : mlrun.mlconf.crud.runs.batch_delete_runs_chunk_size
             ]
-            run_uids_to_delete.extend(
-                [run.get("metadata", {}).get("uid") for run in runs_batch]
-            )
             for run in runs_batch:
+                project_to_run_uids_to_delete.setdefault(run.project, []).append(
+                    run.uid
+                )
                 tasks.append(
                     asyncio.create_task(
                         run_in_threadpool(
                             framework.db.session.run_function_with_new_db_session,
                             self._delete_run_resources,
                             project,
+                            run.uid,
                             run,
                         )
                     )
@@ -354,28 +357,30 @@ class Runs(
                     failed_deletions += 1
                     last_exception = result
                     run = runs_list[i]
-                    uid = run.get("metadata", {}).get("uid")
-                    run_uids_to_delete.remove(uid)
+                    project_to_run_uids_to_delete[run.project].remove(run.uid)
                     logger.warning(
                         "Failed to delete run",
-                        run_uid=uid,
-                        run_name=run.get("metadata", {}).get("name"),
+                        run_uid=run.uid,
+                        run_name=run.name,
                         project=project,
                         error=mlrun.errors.err_to_str(result),
                     )
 
             runs_list = runs_list[mlrun.mlconf.crud.runs.batch_delete_runs_chunk_size :]
 
-        # Delete runs from DB
-        if run_uids_to_delete:
-            framework.utils.singletons.db.get_db().del_runs(
-                session=db_session,
-                project=project,
-                uids=run_uids_to_delete,
-            )
+        # Delete each project runs in parallel, since log deletion doesn't support "*" projects
+        if project_to_run_uids_to_delete:
+            tasks = []
+            for project, run_uids_to_delete in project_to_run_uids_to_delete.items():
+                tasks.append(
+                    framework.db.session.run_function_with_new_db_session(
+                        self._delete_runs,
+                        project,
+                        run_uids_to_delete,
+                    )
+                )
 
-        # Delete logs
-        await self._post_delete_runs(project=project, uids=run_uids_to_delete)
+            await asyncio.gather(*tasks)
 
         if failed_deletions:
             raise mlrun.errors.MLRunBadRequestError(
@@ -518,10 +523,15 @@ class Runs(
 
     @staticmethod
     def _delete_run_resources(
-        db_session, project, run: typing.Union[dict, mlrun.RunObject]
+        db_session,
+        project: str,
+        uid,
+        run: typing.Union[dict, mlrun.RunObject, framework.db.sqldb.models.Run],
     ):
         if isinstance(run, mlrun.RunObject):
             run = run.to_dict()
+        elif isinstance(run, framework.db.sqldb.models.Run):
+            run = run.struct
 
         # validate run state allowed for deletion
         run_state = run.get("status", {}).get("state")
@@ -538,7 +548,6 @@ class Runs(
             .get("labels", {})
             .get(mlrun_constants.MLRunInternalLabels.kind)
         )
-        uid = run.get("metadata", {}).get("uid")
 
         # If time passed is start_time + deletion_grace_period + 1 day, assume the resources are already gone
         # and skip deleting runtime resources
@@ -573,6 +582,17 @@ class Runs(
                     label_selector=f"{mlrun_constants.MLRunInternalLabels.project}={project}",
                     force=True,
                 )
+
+    async def _delete_runs(self, db_session, project: str, uids: list[str]):
+        # Delete runs from DB
+        framework.utils.singletons.db.get_db().del_runs(
+            session=db_session,
+            project=project,
+            uids=uids,
+        )
+
+        # Delete logs
+        await self._post_delete_runs(project=project, uids=uids)
 
     @staticmethod
     async def _post_delete_run(project, uid):
