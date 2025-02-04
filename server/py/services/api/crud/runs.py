@@ -270,7 +270,13 @@ class Runs(
             )
             return
 
-        self._delete_run_resources(db_session, project, uid, run)
+        await run_in_threadpool(
+            self._delete_run_resources,
+            db_session,
+            project,
+            uid,
+            run,
+        )
 
         # get runtime kind for logging
         runtime_kind = (
@@ -331,12 +337,11 @@ class Runs(
         project_to_run_uids_to_delete = {}
 
         # Delete each run's resources asynchronously in batches
-        while runs_list:
+        for chunked_run_list in mlrun.utils.helpers.iterate_list_by_chunks(
+            runs_list, mlrun.mlconf.crud.runs.batch_delete_runs_chunk_size
+        ):
             tasks = []
-            runs_batch = runs_list[
-                : mlrun.mlconf.crud.runs.batch_delete_runs_chunk_size
-            ]
-            for run in runs_batch:
+            for run in chunked_run_list:
                 project_to_run_uids_to_delete.setdefault(run.project, []).append(
                     run.uid
                 )
@@ -365,8 +370,6 @@ class Runs(
                         project=project,
                         error=mlrun.errors.err_to_str(result),
                     )
-
-            runs_list = runs_list[mlrun.mlconf.crud.runs.batch_delete_runs_chunk_size :]
 
         # Delete each project runs in parallel, since log deletion doesn't support "*" projects
         if project_to_run_uids_to_delete:
@@ -585,7 +588,8 @@ class Runs(
 
     async def _delete_runs(self, db_session, project: str, uids: list[str]):
         # Delete runs from DB
-        framework.utils.singletons.db.get_db().del_runs(
+        await run_in_threadpool(
+            framework.utils.singletons.db.get_db().del_runs,
             session=db_session,
             project=project,
             uids=uids,
